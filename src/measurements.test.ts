@@ -127,6 +127,14 @@ describe("normalizeMeasurement", () => {
     expect(m.body_type).toBe("athletic");
   });
 
+  it("records which store the row came from and never leaks the tag into extra", () => {
+    const body = normalizeMeasurement(rawRecord({ __endpoint: "bodyComposition", leftArmMuscle: 3.1 }), TZ);
+    expect(body.source.endpoint).toBe("body_composition");
+    expect(body.extra).toEqual({ leftArmMuscle: 3.1 });
+    expect(normalizeMeasurement(rawRecord({ __endpoint: "legacy" }), TZ).source.endpoint).toBe("legacy");
+    expect(normalizeMeasurement(rawRecord(), TZ).source.endpoint).toBeUndefined();
+  });
+
   it("labels unknown enum codes instead of dropping them", () => {
     const m = normalizeMeasurement(rawRecord({ method: 99, bodyShape: 42 }), TZ);
     expect(m.source.method).toBe("unknown_99");

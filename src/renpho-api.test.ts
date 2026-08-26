@@ -22,13 +22,21 @@ interface FakeRecord {
   weight: number;
   bUserId?: string;
   subUserId: string;
+  /** Extra raw JSON members, e.g. `"leftArmMuscle":3.1` (MorphoScan-style fields). */
+  extra?: string;
 }
 
 interface FakeOptions {
+  /** Rows served by the legacy queryAllMeasureDataList store. */
   records: FakeRecord[];
   order?: "asc" | "desc";
   /** What device/count reports (defaults to records.length). */
   reportedCount?: number;
+  /** Rows served by the queryBodyCompositionMeasureData store (default: none). */
+  bodyRecords?: FakeRecord[];
+  bodyOrder?: "asc" | "desc";
+  /** Envelope code the body-composition store answers with instead of data. */
+  bodyError?: number;
   expAtMs?: number;
   password?: string;
   scaleUserIds?: string[];
@@ -36,14 +44,15 @@ interface FakeOptions {
 
 /** Build JSON by hand so 64-bit ids are emitted as bare integers, like Renpho does. */
 function recordJson(r: FakeRecord): string {
-  return `{"id":${r.id},"timeStamp":${r.ts},"weight":${r.weight},"bodyfat":21.5,"muscle":65.1,"subUserId":${r.subUserId}${r.bUserId ? `,"bUserId":${r.bUserId}` : ""},"method":18,"internalModel":"ES-CS20M"}`;
+  return `{"id":${r.id},"timeStamp":${r.ts},"weight":${r.weight},"bodyfat":21.5,"muscle":65.1,"subUserId":${r.subUserId}${r.bUserId ? `,"bUserId":${r.bUserId}` : ""},"method":18,"internalModel":"ES-CS20M"${r.extra ? `,${r.extra}` : ""}}`;
 }
 
 function makeFake(opts: FakeOptions) {
   const order = opts.order ?? "asc";
+  const bodyOrder = opts.bodyOrder ?? "desc";
   const password = opts.password ?? "pw";
   const scaleUserIds = opts.scaleUserIds ?? [ACCOUNT_ID, OTHER_SUB];
-  const state = { logins: 0, tokenValid: true, requests: [] as string[], pageRequests: [] as number[] };
+  const state = { logins: 0, tokenValid: true, requests: [] as string[], pageRequests: [] as number[], bodyPageRequests: [] as number[] };
   let token = "";
 
   const envelope = (code: number, plaintext?: string) =>
@@ -53,6 +62,7 @@ function makeFake(opts: FakeOptions) {
     });
 
   const sorted = () => [...opts.records].sort((a, b) => (order === "asc" ? a.ts - b.ts : b.ts - a.ts));
+  const sortedBody = () => [...(opts.bodyRecords ?? [])].sort((a, b) => (bodyOrder === "asc" ? a.ts - b.ts : b.ts - a.ts));
 
   const fetchImpl: typeof fetch = async (input, init) => {
     const path = String(input).replace(`${API_BASE}/`, "");
@@ -88,6 +98,13 @@ function makeFake(opts: FakeOptions) {
       expect(req.tableName).toBe(TABLE);
       state.pageRequests.push(req.pageNum);
       const page = sorted().slice((req.pageNum - 1) * req.pageSize, req.pageNum * req.pageSize);
+      return envelope(101, `[${page.map(recordJson).join(",")}]`);
+    }
+    if (path === ENDPOINTS.bodyComposition) {
+      expect(req.tableName).toBe(TABLE);
+      state.bodyPageRequests.push(req.pageNum);
+      if (opts.bodyError !== undefined) return envelope(opts.bodyError);
+      const page = sortedBody().slice((req.pageNum - 1) * req.pageSize, req.pageNum * req.pageSize);
       return envelope(101, `[${page.map(recordJson).join(",")}]`);
     }
     if (path === ENDPOINTS.tokenTime) {
@@ -243,6 +260,58 @@ describe("pagination", () => {
     const res = await client(fake).scanMeasurements({});
     expect(res.tables[0].order).toBe("empty");
     expect(fake.state.pageRequests).toEqual([]);
+  });
+});
+
+describe("body-composition store (MorphoScan-style scales)", () => {
+  it("returns rows that exist only in the body-composition store, even when device/count says 0", async () => {
+    const nova = dailyRecords(5, ACCOUNT_ID, ACCOUNT_ID, "59192784209028").map((r) => ({ ...r, extra: '"leftArmMuscle":3.1,"rightLegFat":2.2' }));
+    const fake = makeFake({ records: [], reportedCount: 0, bodyRecords: nova });
+    const res = await client(fake).getMeasurements({ startSec: NOW - 30 * DAY });
+    expect(fake.state.pageRequests).toEqual([]); // legacy store skipped: count 0
+    expect(fake.state.bodyPageRequests).toEqual([1]);
+    expect(res.records.length).toBe(5);
+    expect(res.records[0].__endpoint).toBe("bodyComposition");
+    expect(res.records[0].leftArmMuscle).toBe(3.1);
+    expect(res.selection).toBe("bound");
+    const scans = res.tables.map((t) => `${t.endpoint}:${t.order}:${t.records}`);
+    expect(scans).toEqual(["legacy:empty:0", "bodyComposition:single:5"]);
+  });
+
+  it("merges both stores by id and keeps the richer body-composition copy", async () => {
+    const legacy = dailyRecords(4);
+    const body = legacy.slice(0, 2).map((r) => ({ ...r, extra: '"smi":8.4' }));
+    const fake = makeFake({ records: legacy, bodyRecords: body });
+    const res = await client(fake).getMeasurements({});
+    expect(res.records.length).toBe(4);
+    expect(res.records[0].__endpoint).toBe("bodyComposition");
+    expect(res.records[0].smi).toBe(8.4);
+    expect(res.records[3].__endpoint).toBe("legacy");
+  });
+
+  it("newest-first body store: stops paging once the window is covered", async () => {
+    const fake = makeFake({ records: [], reportedCount: 0, bodyRecords: dailyRecords(450), bodyOrder: "desc" });
+    const res = await client(fake).getMeasurements({ startSec: NOW - 30 * DAY });
+    expect(fake.state.bodyPageRequests).toEqual([1, 2]); // page 2 only to learn the direction
+    expect(res.records.length).toBe(31);
+    expect(res.tables[1]).toMatchObject({ endpoint: "bodyComposition", order: "desc", pages_fetched: 2, truncated: false });
+  });
+
+  it("oldest-first body store: walks to the short last page to reach the newest rows", async () => {
+    const fake = makeFake({ records: [], reportedCount: 0, bodyRecords: dailyRecords(450), bodyOrder: "asc" });
+    const res = await client(fake).getMeasurements({ startSec: NOW - 30 * DAY });
+    expect(fake.state.bodyPageRequests).toEqual([1, 2, 3]);
+    expect(res.records[0].timeStamp).toBe(NOW);
+    expect(res.records.length).toBe(31);
+    expect(res.tables[1].order).toBe("asc");
+  });
+
+  it("a failing body-composition store does not break legacy results", async () => {
+    const fake = makeFake({ records: dailyRecords(3), bodyError: -1 });
+    const res = await client(fake).getMeasurements({});
+    expect(res.records.length).toBe(3);
+    expect(res.tables[1].endpoint).toBe("bodyComposition");
+    expect(res.tables[1].error).toMatch(/code -1/);
   });
 });
 

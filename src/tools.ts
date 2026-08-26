@@ -166,10 +166,14 @@ function selectionNote(result: MeasurementResult): string | undefined {
 }
 
 function scanNote(tables: TableScan[]): string | undefined {
-  const truncated = tables.filter((t) => t.truncated).map((t) => t.table_name);
-  return truncated.length
-    ? `Scan stopped early on ${truncated.join(", ")} after ${MAX_PAGES_PER_TABLE} pages (${MAX_PAGES_PER_TABLE * PAGE_SIZE} records); narrow the window for complete coverage.`
-    : undefined;
+  const notes: string[] = [];
+  const truncated = tables.filter((t) => t.truncated).map((t) => `${t.table_name}/${t.endpoint}`);
+  if (truncated.length) {
+    notes.push(`Scan stopped early on ${truncated.join(", ")} after ${MAX_PAGES_PER_TABLE} pages (${MAX_PAGES_PER_TABLE * PAGE_SIZE} records); narrow the window for complete coverage.`);
+  }
+  const errored = tables.filter((t) => t.error).map((t) => `${t.table_name}/${t.endpoint}: ${t.error}`);
+  if (errored.length) notes.push(`One store could not be read (${errored.join("; ")}); results come from the other store only.`);
+  return notes.length ? notes.join(" ") : undefined;
 }
 
 function compact<T extends Record<string, unknown>>(obj: T): T {
@@ -261,7 +265,7 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
     {
       title: "Measurement History",
       description:
-        "Get scale readings over a date range — every metric per reading, or averaged per day/week to keep the payload small. Use `metrics` to request only the fields you need. Records are returned oldest→newest.",
+        "Get scale readings over a date range — every metric per reading, or averaged per day/week to keep the payload small. Use `metrics` to request only the fields you need. Records are returned oldest→newest. Set include_details to see the source device/store and any device-specific fields (e.g. MorphoScan segmental data under `extra`).",
       inputSchema: {
         ...WINDOW_SCHEMA,
         metrics: z.array(METRIC).min(1).optional().describe("Subset of metrics to return (default: all)."),
@@ -537,7 +541,7 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
     {
       title: "Run Diagnostics",
       description:
-        "Probe the Renpho connection end to end: session/token status, device categories and tables, page ordering, the last 14 days of readings across every profile (bound vs unbound, hidden readings, devices seen), and cache status. Use this when readings look missing, stale, or attributed to the wrong person.",
+        "Probe the Renpho connection end to end: session/token status and devices bound at login, device categories and tables, page ordering per store (legacy vs body-composition), the last 14 days of readings across every profile (bound vs unbound, hidden readings, devices seen, which store each came from, any unrecognised fields), and cache status. Use this when readings look missing, stale, or attributed to the wrong person.",
       inputSchema: { days: z.number().int().min(1).max(90).default(14).describe("How many recent days to inspect.") },
       annotations: READ_ONLY,
     },
@@ -559,7 +563,12 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
       out.session_was_cached = Boolean(cached);
       const session = await probe("session", async () => {
         const s = await client.getSession();
-        return { renpho_user_id: s.userId, token_expires_at: localIso(Math.floor(s.expiresAt / 1000), timeZone), minutes_left: round((s.expiresAt - Date.now()) / 60_000, 1) };
+        return {
+          renpho_user_id: s.userId,
+          token_expires_at: localIso(Math.floor(s.expiresAt / 1000), timeZone),
+          minutes_left: round((s.expiresAt - Date.now()) / 60_000, 1),
+          devices_bound_at_login: s.bindingList,
+        };
       });
       if (!session) return jsonResult(out);
 
@@ -589,11 +598,21 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
             else devices.set(key, { model: r.source.model, scale_name: r.source.scale_name, mac: r.source.mac, readings: 1, latest: r.time });
           }
 
-          const brief = (r: NormalizedMeasurement) => ({ id: r.id, time: r.time, weight_kg: r.weight_kg, body_fat_pct: r.body_fat_pct, bound_user_id: r.user.bound_user_id, scale_user_id: r.user.scale_user_id, method: r.source.method });
+          const byEndpoint: Record<string, number> = {};
+          const extraKeys = new Set<string>();
+          for (const r of records) {
+            const ep = r.source.endpoint ?? "unknown";
+            byEndpoint[ep] = (byEndpoint[ep] ?? 0) + 1;
+            for (const k of Object.keys(r.extra ?? {})) extraKeys.add(k);
+          }
+
+          const brief = (r: NormalizedMeasurement) => ({ id: r.id, time: r.time, weight_kg: r.weight_kg, body_fat_pct: r.body_fat_pct, bound_user_id: r.user.bound_user_id, scale_user_id: r.user.scale_user_id, method: r.source.method, model: r.source.model, endpoint: r.source.endpoint });
           return compact({
             window_days: days,
             page_scan: all.tables,
             readings_all_profiles: records.length,
+            readings_by_store: byEndpoint,
+            unrecognised_fields_seen: extraKeys.size ? Array.from(extraKeys).sort().slice(0, 80) : undefined,
             readings_bound_to_account: bound.length,
             readings_selected_for_account: mine.records.length,
             selection_rule: mine.selection,

@@ -175,6 +175,8 @@ export interface NormalizedMeasurement {
     actual_sec_resistance?: number;
   };
   source: {
+    /** Which Renpho store the row came from: "legacy" (queryAllMeasureDataList) or "body_composition". */
+    endpoint?: "legacy" | "body_composition";
     method?: string;
     method_code?: number;
     model?: string;
@@ -264,8 +266,10 @@ export function normalizeMeasurement(raw: RawMeasurement, timeZone: string): Nor
   if (!m.impedance) delete m.impedance;
 
   const methodCode = num(raw.method);
+  const endpointTag = raw.__endpoint;
   m.source =
     compact({
+      endpoint: endpointTag === "bodyComposition" ? "body_composition" : endpointTag === "legacy" ? "legacy" : undefined,
       method: methodCode === undefined ? undefined : (SOURCE_METHOD[methodCode] ?? `unknown_${methodCode}`),
       method_code: methodCode,
       model: str(raw.internalModel),

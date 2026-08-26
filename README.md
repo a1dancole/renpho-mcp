@@ -85,11 +85,19 @@ as strings before parsing ([`src/json.ts`](src/json.ts)).
   by logging in again — Renpho has no refresh tokens.
 - **`device/count`** lists the account's data tables and record counts and is
   fetched fresh on every tool call; it is the freshness signal.
-- **Measurement pages** (200 records each) are cached in KV keyed by table,
-  profile set **and record count**, so a new weigh-in changes the key and
-  invalidates automatically. The paginator detects which way the table is
-  ordered and walks from the newest page only as far as the requested window
-  needs (max 30 pages / 6 000 records per table per call).
+- **Two stores per table.** Each `measurements_info_N` table is read from
+  *both* `scale/queryAllMeasureDataList` (the legacy store, whose rows
+  `device/count` counts) and `scale/queryBodyCompositionMeasureData` (the
+  newer store used by 8-electrode / multi-frequency scales such as the
+  **MorphoScan**, which `device/count` does *not* count). Rows are merged by
+  id, keeping the body-composition copy when both exist because it carries the
+  richer field set; `source.endpoint` says which store a reading came from.
+- **Measurement pages** (200 records each) are cached in KV. Legacy pages are
+  keyed by table, profile set **and record count**, so a new weigh-in changes
+  the key and invalidates automatically; body-composition pages have no count
+  and are cached for 15 minutes instead. The paginator detects which way each
+  store is ordered and walks only as far as the requested window needs (max
+  30 pages / 6 000 records per store per call).
 - **Selection:** readings bound to the signed-in account (`bUserId`) are
   returned by default; if nothing is bound yet (Wi-Fi scales upload before the
   app binds the reading) it falls back to the account's first scale-user
@@ -217,6 +225,12 @@ Claude (web/desktop/mobile)
   Renpho app. `muscle` is reported as muscle *mass* (kg) and `sinew` as
   skeletal-muscle %; if your device firmware reports otherwise, the raw
   values are unchanged — only the label differs.
+- **MorphoScan / 8-electrode scales.** Their readings live in the
+  body-composition store (see above) and carry extra device-specific fields —
+  segmental fat/muscle, SMI, etc. — which the tools pass through under `extra`
+  (ask for `include_details`, or see `unrecognised_fields_seen` in
+  `run_diagnostics`). Please open an issue with those field names so they can
+  be mapped properly.
 - **Only the `scale` category** has dedicated tools. Girth/tape, treadmill,
   rope and body-scan (MorphoScan) data show up in `get_scale_users` →
   `device_categories` and can be explored with `query_endpoint`.

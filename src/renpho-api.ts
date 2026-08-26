@@ -28,8 +28,28 @@ export const ENDPOINTS = {
   deviceCount: "renpho-aggregation/device/count",
   tokenTime: "RenphoHealth/app/sync/getTokenTime",
   familyMembers: "RenphoHealth/centerUser/queryFamilyMemberList",
+  /** Legacy scale rows; `device/count` describes these. */
   measurements: "RenphoHealth/scale/queryAllMeasureDataList",
+  /**
+   * Newer store used by impedance / multi-frequency scales (e.g. MorphoScan).
+   * `device/count` does NOT count these rows (credit: danvaneijck/renpho-api),
+   * so it is paged blind until a short page.
+   */
+  bodyComposition: "RenphoHealth/scale/queryBodyCompositionMeasureData",
+  /** Smart tape-measure circumferences (no table/user id; paged by pageNum/pageSize). */
+  girthMeasurements: "RenphoHealth/renpho/girth/queryAllGirthsDataList",
 } as const;
+
+/** Which measurement store a row was read from. */
+export type MeasurementEndpoint = "legacy" | "bodyComposition";
+
+const ENDPOINT_PATH: Record<MeasurementEndpoint, string> = {
+  legacy: ENDPOINTS.measurements,
+  bodyComposition: ENDPOINTS.bodyComposition,
+};
+
+/** Rows are tagged with the store they came from under this key (stripped from output). */
+export const ENDPOINT_TAG = "__endpoint";
 
 const APP_VERSION = "7.0.0";
 const PLATFORM = "android";
@@ -46,6 +66,8 @@ const SESSION_SAFETY_MS = 2 * 60 * 1000;
 /** Measurement pages are keyed by the table's record count, so a new weigh-in
  *  changes the key; this TTL only bounds staleness for in-place edits. */
 const PAGE_TTL_SECONDS = 6 * 60 * 60;
+/** Body-composition pages have no count to key on, so they only live briefly. */
+const BODY_COMP_PAGE_TTL_SECONDS = 15 * 60;
 /** device/count is the freshness signal for pages — memoise only briefly. */
 const DEVICE_INFO_MEMO_MS = 30 * 1000;
 
@@ -119,6 +141,8 @@ export interface Session {
   expiresAt: number;
   /** The `login` object of the login response, minus the token/password. */
   login: Record<string, unknown>;
+  /** Devices bound to the account, as reported at login (diagnostics). */
+  bindingList?: unknown;
 }
 
 export interface ScaleTable {
@@ -164,12 +188,18 @@ export interface RenphoClientOptions {
 
 export interface TableScan {
   table_name: string;
-  count: number;
+  /** Which store this scan read. */
+  endpoint: MeasurementEndpoint;
+  /** Record count reported by device/count (legacy store only; unknown for bodyComposition). */
+  count?: number;
   pages_fetched: number;
+  records: number;
   /** Which direction the API pages in: "asc" = last page is newest. */
   order: "asc" | "desc" | "single" | "empty";
   /** True if MAX_PAGES_PER_TABLE stopped the scan before the range was covered. */
   truncated: boolean;
+  /** Set when this store errored; the other store's rows are still returned. */
+  error?: string;
 }
 
 export interface ScanResult {
@@ -394,7 +424,7 @@ export class RenphoClient {
     }
     if (!env.data) throw new RenphoAuthError("Renpho login returned no data", env.code);
 
-    const payload = parseRenphoJson<{ login?: Record<string, unknown> }>(renphoDecrypt(env.data));
+    const payload = parseRenphoJson<{ login?: Record<string, unknown>; bindingList?: unknown }>(renphoDecrypt(env.data));
     const login = payload.login;
     if (!login || typeof login.token !== "string" || login.id === undefined) {
       throw new RenphoAuthError("Renpho login response did not include a token/user id");
@@ -414,6 +444,7 @@ export class RenphoClient {
       issuedAt: issAt,
       expiresAt,
       login: rest,
+      bindingList: payload.bindingList,
     };
   }
 
@@ -542,7 +573,18 @@ export class RenphoClient {
     if (!force && this.deviceInfoMemo && this.now() - this.deviceInfoMemo.at < DEVICE_INFO_MEMO_MS) {
       return this.deviceInfoMemo.info;
     }
-    const raw = await this.call<Record<string, unknown>>(ENDPOINTS.deviceCount, null);
+    // The app sends an encrypted empty byte array; some deployments only
+    // accept an encrypted "{}" — try both before giving up.
+    let raw: Record<string, unknown> | null;
+    try {
+      raw = await this.call<Record<string, unknown> | null>(ENDPOINTS.deviceCount, null);
+    } catch (first) {
+      try {
+        raw = await this.call<Record<string, unknown> | null>(ENDPOINTS.deviceCount, null, { emptyAsObject: true });
+      } catch {
+        throw first;
+      }
+    }
     const info: DeviceInfo = {
       raw: raw ?? {},
       tables: parseScaleTables(raw ?? {}),
@@ -562,48 +604,51 @@ export class RenphoClient {
     return [];
   }
 
-  /** One page of a table. Cached (sealed) keyed by table + user set + record count. */
-  async fetchPage(table: ScaleTable, pageNum: number, pageSize = PAGE_SIZE): Promise<RawMeasurement[]> {
-    const key = this.key("page", table.table_name, table.user_ids.join(","), table.count, pageSize, pageNum);
+  /**
+   * One page of a table from either store. Cached (sealed): legacy pages are
+   * keyed by the device/count record count (a new weigh-in changes the key);
+   * body-composition pages have no count, so they get a short TTL instead.
+   */
+  async fetchPage(
+    table: ScaleTable,
+    pageNum: number,
+    pageSize = PAGE_SIZE,
+    endpoint: MeasurementEndpoint = "legacy",
+  ): Promise<RawMeasurement[]> {
+    const key = this.key(
+      "page",
+      endpoint,
+      table.table_name,
+      table.user_ids.join(","),
+      endpoint === "legacy" ? table.count : "-",
+      pageSize,
+      pageNum,
+    );
     const cached = await this.cacheGet<RawMeasurement[]>(key);
     if (cached) return cached;
 
-    const res = await this.call<unknown>(ENDPOINTS.measurements, {
+    const res = await this.call<unknown>(ENDPOINT_PATH[endpoint], {
       pageNum,
       pageSize,
       userIds: table.user_ids,
       tableName: table.table_name,
     });
-    const rows: RawMeasurement[] = Array.isArray(res)
-      ? (res as RawMeasurement[])
-      : res && typeof res === "object" && Array.isArray((res as { list?: unknown }).list)
-        ? (res as { list: RawMeasurement[] }).list
-        : [];
+    const rows: RawMeasurement[] = (
+      Array.isArray(res)
+        ? (res as RawMeasurement[])
+        : res && typeof res === "object" && Array.isArray((res as { list?: unknown }).list)
+          ? (res as { list: RawMeasurement[] }).list
+          : []
+    ).map((r) => ({ ...r, [ENDPOINT_TAG]: endpoint }));
 
-    if (rows.length) await this.cachePut(key, rows, PAGE_TTL_SECONDS);
+    if (rows.length) {
+      await this.cachePut(key, rows, endpoint === "legacy" ? PAGE_TTL_SECONDS : BODY_COMP_PAGE_TTL_SECONDS);
+    }
     return rows;
   }
 
-  /**
-   * Pull the pages of one table needed to cover a time window (or a record
-   * count), regardless of which way the API orders its pages. Strategy:
-   * fetch the last page and the one before it, compare their newest
-   * timestamps to learn the direction, then keep walking toward older
-   * records until a page dips below `startSec` (or `limit` is met).
-   */
-  async scanTable(table: ScaleTable, opts: ScanOptions): Promise<{ records: RawMeasurement[]; scan: TableScan }> {
-    const pageSize = PAGE_SIZE;
-    const pages: RawMeasurement[][] = [];
-    const scan: TableScan = { table_name: table.table_name, count: table.count, pages_fetched: 0, order: "empty", truncated: false };
-
-    if (table.count <= 0) return { records: [], scan };
-
-    const fetchTracked = async (p: number) => {
-      const rows = await this.fetchPage(table, p, pageSize);
-      scan.pages_fetched++;
-      pages.push(rows);
-      return rows;
-    };
+  /** Scan helpers shared by both stores. */
+  private scanHelpers(opts: ScanOptions, pages: RawMeasurement[][], scan: TableScan) {
     const minTs = (rows: RawMeasurement[]) => (rows.length ? Math.min(...rows.map(tsOf)) : Infinity);
     const maxTs = (rows: RawMeasurement[]) => (rows.length ? Math.max(...rows.map(tsOf)) : -Infinity);
     const oldEnough = (rows: RawMeasurement[]) => opts.startSec !== undefined && rows.length > 0 && minTs(rows) < opts.startSec;
@@ -611,6 +656,31 @@ export class RenphoClient {
       pages.flat().filter((r) => (opts.endSec === undefined || tsOf(r) < opts.endSec) && (opts.startSec === undefined || tsOf(r) >= opts.startSec)).length;
     const enough = () => opts.limit !== undefined && opts.startSec === undefined && inRangeCount() >= opts.limit;
     const budgetLeft = () => scan.pages_fetched < MAX_PAGES_PER_TABLE;
+    return { minTs, maxTs, oldEnough, enough, budgetLeft };
+  }
+
+  /**
+   * Pull the pages of one table's *legacy* store needed to cover a time
+   * window (or a record count), regardless of which way the API orders its
+   * pages. Strategy: fetch the last page and the one before it, compare their
+   * newest timestamps to learn the direction, then keep walking toward older
+   * records until a page dips below `startSec` (or `limit` is met).
+   */
+  async scanTable(table: ScaleTable, opts: ScanOptions): Promise<{ records: RawMeasurement[]; scan: TableScan }> {
+    const pageSize = PAGE_SIZE;
+    const pages: RawMeasurement[][] = [];
+    const scan: TableScan = { table_name: table.table_name, endpoint: "legacy", count: table.count, pages_fetched: 0, records: 0, order: "empty", truncated: false };
+
+    if (table.count <= 0) return { records: [], scan };
+
+    const fetchTracked = async (p: number) => {
+      const rows = await this.fetchPage(table, p, pageSize, "legacy");
+      scan.pages_fetched++;
+      pages.push(rows);
+      scan.records += rows.length;
+      return rows;
+    };
+    const { maxTs, oldEnough, enough, budgetLeft } = this.scanHelpers(opts, pages, scan);
 
     const totalPages = Math.max(1, Math.ceil(table.count / pageSize));
     const lastRows = await fetchTracked(totalPages);
@@ -663,17 +733,82 @@ export class RenphoClient {
     return { records: pages.flat(), scan };
   }
 
-  /** Scan every (or the given) scale table and merge, deduped by id, newest first. */
+  /**
+   * Pull one table's *body-composition* store. There is no record count for
+   * it, so we page forward from 1: if page 1 is newest-first we can stop as
+   * soon as a page dips below `startSec`; if it is oldest-first we must walk
+   * to the last (short) page to reach the newest rows. Errors are captured on
+   * the scan rather than thrown, so an account whose backend lacks this store
+   * still gets its legacy rows.
+   */
+  async scanBodyCompositionTable(table: ScaleTable, opts: ScanOptions): Promise<{ records: RawMeasurement[]; scan: TableScan }> {
+    const pageSize = PAGE_SIZE;
+    const pages: RawMeasurement[][] = [];
+    const scan: TableScan = { table_name: table.table_name, endpoint: "bodyComposition", pages_fetched: 0, records: 0, order: "empty", truncated: false };
+
+    const fetchTracked = async (p: number) => {
+      const rows = await this.fetchPage(table, p, pageSize, "bodyComposition");
+      scan.pages_fetched++;
+      pages.push(rows);
+      scan.records += rows.length;
+      return rows;
+    };
+    const { maxTs, oldEnough, enough, budgetLeft } = this.scanHelpers(opts, pages, scan);
+
+    try {
+      const first = await fetchTracked(1);
+      if (!first.length) return { records: [], scan };
+      if (first.length < pageSize) {
+        scan.order = "single";
+        return { records: first, scan };
+      }
+
+      const second = await fetchTracked(2);
+      if (!second.length) {
+        scan.order = "single";
+        return { records: first, scan };
+      }
+      const newestFirst = maxTs(first) >= maxTs(second);
+      scan.order = newestFirst ? "desc" : "asc";
+
+      let rows = second;
+      let stop = newestFirst && (oldEnough(first) || oldEnough(second) || enough());
+      for (let p = 3; !stop && rows.length >= pageSize; p++) {
+        if (!budgetLeft()) {
+          scan.truncated = true;
+          break;
+        }
+        rows = await fetchTracked(p);
+        if (newestFirst) stop = oldEnough(rows) || enough();
+      }
+    } catch (err) {
+      scan.error = err instanceof Error ? err.message : String(err);
+    }
+
+    return { records: pages.flat(), scan };
+  }
+
+  /**
+   * Scan every (or the given) scale table across BOTH stores and merge,
+   * deduped by id (a row present in both keeps the body-composition copy,
+   * which carries the richer field set), newest first.
+   */
   async scanMeasurements(opts: ScanOptions = {}): Promise<ScanResult> {
     const tables = opts.tables ?? (await this.getDeviceInfo()).tables;
-    const results = await Promise.all(tables.map((t) => this.scanTable(t, opts)));
+    const [legacy, body] = await Promise.all([
+      Promise.all(tables.map((t) => this.scanTable(t, opts))),
+      Promise.all(tables.map((t) => this.scanBodyCompositionTable(t, opts))),
+    ]);
     const byId = new Map<string, RawMeasurement>();
-    for (const r of results.flatMap((x) => x.records)) {
+    for (const r of [...body, ...legacy].flatMap((x) => x.records)) {
       const id = idOf(r);
-      if (!byId.has(id)) byId.set(id, r);
+      const existing = byId.get(id);
+      if (!existing || (r[ENDPOINT_TAG] === "bodyComposition" && existing[ENDPOINT_TAG] !== "bodyComposition")) {
+        byId.set(id, r);
+      }
     }
     const records = Array.from(byId.values()).sort((a, b) => tsOf(b) - tsOf(a));
-    return { records, tables: results.map((x) => x.scan) };
+    return { records, tables: [...legacy.map((x) => x.scan), ...body.map((x) => x.scan)] };
   }
 
   /**
