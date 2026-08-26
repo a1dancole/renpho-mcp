@@ -15,9 +15,12 @@ import {
   aggregateDaily,
   aggregateWeekly,
   classify,
+  deviceKey,
   normalizeMeasurement,
   normalizeProfile,
   pickMetrics,
+  summarizeDevices,
+  summarizeExtraFields,
   type MetricKey,
   type NormalizedMeasurement,
   type Profile,
@@ -180,6 +183,15 @@ function compact<T extends Record<string, unknown>>(obj: T): T {
   return JSON.parse(JSON.stringify(obj)) as T;
 }
 
+const DEVICE_CHANGE_NOTE =
+  "Readings span more than one scale. Body-composition metrics come from device-specific equations and electrode layouts and are NOT comparable across the change (weight is). Treat any step at the changeover as an artefact, not physiology.";
+
+/** Warn when a set of readings straddles a change of scale. */
+function deviceChange(records: NormalizedMeasurement[]) {
+  const scales = summarizeDevices(records);
+  return scales ? { scales, note: DEVICE_CHANGE_NOTE } : undefined;
+}
+
 /**
  * Register all tools on the MCP server. `getClient` defers client
  * construction to call-time so props/bindings are live.
@@ -213,17 +225,30 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
         const profile = await loadProfile(client);
         const ctx = { gender: profile.gender, age: profile.age };
 
-        const changes: Record<string, Record<string, { then: number; delta: number }>> = {};
+        // Deltas are only computed against readings from the SAME scale: a
+        // different device means different equations, and "body fat −8%" at a
+        // scale change is an artefact that reads like physiology.
+        const latestKey = deviceKey(latest);
+        const sameDevice = records.filter((r) => deviceKey(r) === latestKey);
+        const otherDevice = records.filter((r) => deviceKey(r) !== latestKey);
+        const changes: Record<string, unknown> = {};
         for (const horizon of [7, 30, 90]) {
           const entry: Record<string, { then: number; delta: number }> = {};
           for (const metric of KEY_METRICS) {
             const current = (latest as unknown as Record<string, unknown>)[metric];
             if (typeof current !== "number") continue;
-            const then = valueAtDaysAgo(pointsFor(records, metric), horizon, latest.timestamp);
+            const then = valueAtDaysAgo(pointsFor(sameDevice, metric), horizon, latest.timestamp);
             if (then) entry[metric] = { then: then.v, delta: round(current - then.v) };
           }
-          if (Object.keys(entry).length) changes[`vs_${horizon}d`] = entry;
+          if (Object.keys(entry).length) {
+            changes[`vs_${horizon}d`] = entry;
+          } else if (valueAtDaysAgo(pointsFor(otherDevice, "weight_kg"), horizon, latest.timestamp)) {
+            changes[`vs_${horizon}d`] = {
+              suppressed: `The reading ~${horizon} days ago came from a different scale (${sameDevice[sameDevice.length - 1]?.date ?? "?"} is the current scale's first reading); body-composition values are not comparable across devices, so no delta is shown.`,
+            };
+          }
         }
+        const device_change = deviceChange(records);
 
         const goal = profile.goals.weight_kg;
         const goal_progress = goal
@@ -246,6 +271,7 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
             measurement: latest,
             classification: classify(latest, ctx),
             changes,
+            device_change,
             goal_progress,
             profile_context: compact({ gender: profile.gender, age: profile.age, height_cm: profile.height_cm, athlete_mode: profile.athlete_mode }),
             readings_last_97_days: records.length,
@@ -318,6 +344,7 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
             skipped_malformed: skipped || undefined,
             note: selectionNote(result),
             scan_note: scanNote(result.tables),
+            device_change: deviceChange(records),
             [aggregate === "none" ? "records" : aggregate]: rows,
           }),
         );
@@ -371,6 +398,7 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
             hidden_other_user_records: result.hidden || undefined,
             note: selectionNote(result),
             scan_note: scanNote(result.tables),
+            device_change: deviceChange(records),
             metrics: summaries,
             series_granularity: useWeekly ? "weekly" : "daily",
             series: useWeekly ? aggregateWeekly(daily, keys) : daily,
@@ -455,6 +483,7 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
             hidden_other_user_records: result.hidden || undefined,
             note: selectionNote(result),
             scan_note: scanNote(result.tables),
+            device_change: deviceChange(records),
             summary: summary && {
               ...summary,
               first: { time: localIso(summary.first.t, timeZone), value: summary.first.v },
@@ -599,12 +628,11 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
           }
 
           const byEndpoint: Record<string, number> = {};
-          const extraKeys = new Set<string>();
           for (const r of records) {
             const ep = r.source.endpoint ?? "unknown";
             byEndpoint[ep] = (byEndpoint[ep] ?? 0) + 1;
-            for (const k of Object.keys(r.extra ?? {})) extraKeys.add(k);
           }
+          const extraFields = summarizeExtraFields(records);
 
           const brief = (r: NormalizedMeasurement) => ({ id: r.id, time: r.time, weight_kg: r.weight_kg, body_fat_pct: r.body_fat_pct, bound_user_id: r.user.bound_user_id, scale_user_id: r.user.scale_user_id, method: r.source.method, model: r.source.model, endpoint: r.source.endpoint });
           return compact({
@@ -612,7 +640,12 @@ export function registerTools(server: McpServer, getClient: () => RenphoClient, 
             page_scan: all.tables,
             readings_all_profiles: records.length,
             readings_by_store: byEndpoint,
-            unrecognised_fields_seen: extraKeys.size ? Array.from(extraKeys).sort().slice(0, 80) : undefined,
+            device_change: deviceChange(records),
+            unrecognised_fields: Object.keys(extraFields).length ? extraFields : undefined,
+            unrecognised_fields_guide:
+              Object.keys(extraFields).length
+                ? "Per field: value range, `equals_metric` when it duplicates a mapped metric on every reading, and Pearson r against body-fat % and weight. Fields with |r| near 1 vs body_fat_pct are derived body-composition outputs, not raw measurements."
+                : undefined,
             readings_bound_to_account: bound.length,
             readings_selected_for_account: mine.records.length,
             selection_rule: mine.selection,

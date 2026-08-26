@@ -6,9 +6,12 @@ import {
   aggregateWeekly,
   classify,
   classifyBodyFat,
+  deviceKey,
   normalizeMeasurement,
   normalizeProfile,
   pickMetrics,
+  summarizeDevices,
+  summarizeExtraFields,
   weekStartOf,
   type RawMeasurement,
 } from "./measurements";
@@ -191,6 +194,47 @@ describe("aggregateDaily / aggregateWeekly", () => {
     const daily = aggregateDaily(records);
     for (const key of ["weight_kg", "bmi", "body_water_pct"]) expect(daily[2]).toHaveProperty(key);
     expect(METRIC_KEYS).toContain("visceral_fat_level");
+  });
+});
+
+describe("devices", () => {
+  const DAY = 86_400;
+  const old = (i: number) => normalizeMeasurement(rawRecord({ id: `o${i}`, timeStamp: T - (20 + i) * DAY, mac: "84:FC:E6:EF:8E:55", deviceType: "00026", internalModel: "ES-26M" }), TZ);
+  const nova = (i: number) => normalizeMeasurement(rawRecord({ id: `n${i}`, timeStamp: T - i * DAY, mac: "AA:BB:CC:00:00:01", deviceType: "00051", internalModel: "MORPHO-NOVA" }), TZ);
+
+  it("keys a reading by MAC, falling back to model + device type", () => {
+    expect(deviceKey(nova(0))).toBe("AA:BB:CC:00:00:01");
+    expect(deviceKey(normalizeMeasurement(rawRecord({ mac: null, internalModel: "X", deviceType: "00026" }), TZ))).toBe("X|00026");
+  });
+
+  it("summarises a scale change with per-device spans, and is silent for one device", () => {
+    const spans = summarizeDevices([nova(0), nova(1), old(0), old(3)])!;
+    expect(spans.map((s) => [s.device.model, s.first_date, s.last_date, s.readings])).toEqual([
+      ["ES-26M", "2026-05-19", "2026-05-22", 2],
+      ["MORPHO-NOVA", "2026-06-10", "2026-06-11", 2],
+    ]);
+    expect(summarizeDevices([nova(0), nova(1)])).toBeUndefined();
+  });
+});
+
+describe("summarizeExtraFields", () => {
+  const rec = (i: number, extra: Record<string, unknown>) =>
+    normalizeMeasurement(rawRecord({ id: String(i), timeStamp: T - i * 86_400, weight: 88 - i, bodyfat: 20 + i, ...extra }), TZ);
+
+  it("flags a field that duplicates a mapped metric, and correlates the rest", () => {
+    const records = [
+      rec(0, { z100Body: 20, z20Body: 600, zLeftArm: 300, note: "x" }),
+      rec(1, { z100Body: 21, z20Body: 590, zLeftArm: 310 }),
+      rec(2, { z100Body: 22, z20Body: 580, zLeftArm: 290 }),
+      rec(3, { z100Body: 23, z20Body: 570, zLeftArm: 320 }),
+    ];
+    const s = summarizeExtraFields(records);
+    expect(s.z100Body).toMatchObject({ readings: 4, type: "number", min: 20, max: 23, equals_metric: "body_fat_pct", r_vs_body_fat_pct: 1 });
+    expect(s.z20Body.equals_metric).toBeUndefined();
+    expect(s.z20Body.r_vs_body_fat_pct).toBe(-1); // falls as fat rises in this fixture
+    expect(s.z20Body.r_vs_weight_kg).toBe(1);
+    expect(Math.abs(s.zLeftArm.r_vs_body_fat_pct!)).toBeLessThan(0.9);
+    expect(s.note).toEqual({ readings: 1, type: "other", sample: '"x"' });
   });
 });
 

@@ -1,5 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { linearRegression, projectGoal, rollingMean, summarizeSeries, valueAtDaysAgo } from "./stats";
+import { linearRegression, pearson, projectGoal, rollingMean, summarizeSeries, valueAtDaysAgo } from "./stats";
+
+describe("pearson", () => {
+  it("is 1 for a perfect positive relation, −1 for negative, undefined when degenerate", () => {
+    expect(pearson([[1, 2], [2, 4], [3, 6]])).toBe(1);
+    expect(pearson([[1, 6], [2, 4], [3, 2]])).toBe(-1);
+    expect(pearson([[1, 5], [2, 5], [3, 5]])).toBeUndefined(); // zero variance
+    expect(pearson([[1, 2], [2, 3]])).toBeUndefined(); // too few pairs
+  });
+
+  it("is near 0 for unrelated series", () => {
+    expect(Math.abs(pearson([[1, 1], [2, -1], [3, 1], [4, -1]])!)).toBeLessThan(0.5);
+  });
+});
 
 const DAY = 86_400;
 const T0 = 1_780_000_000;

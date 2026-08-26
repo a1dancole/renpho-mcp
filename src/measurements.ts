@@ -7,6 +7,7 @@
  * adds fields.
  */
 import { localDate, localIso } from "./dates";
+import { pearson } from "./stats";
 
 /** A raw record exactly as decrypted from the API (ids already stringified). */
 export type RawMeasurement = Record<string, unknown>;
@@ -391,6 +392,123 @@ export function aggregateWeekly(daily: DailyAggregate[], metrics: MetricKey[] = 
       }
       return week;
     });
+}
+
+// ---------------------------------------------------------------------------
+// Devices
+// ---------------------------------------------------------------------------
+
+export interface DeviceIdentity {
+  model?: string;
+  scale_name?: string;
+  device_type?: string;
+  mac?: string;
+}
+
+/**
+ * Identity of the scale behind a reading. MAC is the most stable handle; a
+ * reading without one falls back to model + device type. Two scales of the
+ * same model still collide on the fallback, which is acceptable: their
+ * equations are identical.
+ */
+export function deviceKey(m: NormalizedMeasurement): string {
+  return m.source.mac ?? `${m.source.model ?? "?"}|${m.source.device_type ?? "?"}`;
+}
+
+export function deviceIdentity(m: NormalizedMeasurement): DeviceIdentity {
+  return compact({ model: m.source.model, scale_name: m.source.scale_name, device_type: m.source.device_type, mac: m.source.mac }) ?? {};
+}
+
+export interface DeviceSpan {
+  device: DeviceIdentity;
+  first_date: string;
+  last_date: string;
+  readings: number;
+}
+
+/**
+ * Which scales produced a set of readings, with the date span of each. Returns
+ * undefined for a single device — the caller only needs to warn when a window
+ * straddles a change of scale, because body-composition metrics come from
+ * device-specific equations and electrode layouts and are not comparable
+ * across it (weight is).
+ */
+export function summarizeDevices(records: NormalizedMeasurement[]): DeviceSpan[] | undefined {
+  const spans = new Map<string, DeviceSpan>();
+  for (const r of [...records].sort((a, b) => a.timestamp - b.timestamp)) {
+    const key = deviceKey(r);
+    const span = spans.get(key);
+    if (span) {
+      span.last_date = r.date;
+      span.readings++;
+    } else {
+      spans.set(key, { device: deviceIdentity(r), first_date: r.date, last_date: r.date, readings: 1 });
+    }
+  }
+  return spans.size > 1 ? Array.from(spans.values()) : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Unrecognised (device-specific) fields
+// ---------------------------------------------------------------------------
+
+export interface ExtraFieldSummary {
+  readings: number;
+  type: "number" | "other";
+  min?: number;
+  max?: number;
+  mean?: number;
+  /** A mapped metric this field equals on every reading where both exist (≥2) — i.e. a duplicate under another name. */
+  equals_metric?: MetricKey;
+  r_vs_body_fat_pct?: number;
+  r_vs_weight_kg?: number;
+  sample?: string;
+}
+
+/**
+ * Profile every field that landed in `extra`, so a new device's fields can be
+ * identified from data rather than guessed: value range, whether the field is
+ * a byte-for-byte duplicate of a mapped metric, and how it correlates with
+ * body-fat % and weight.
+ */
+export function summarizeExtraFields(records: NormalizedMeasurement[]): Record<string, ExtraFieldSummary> {
+  const keys = new Set<string>();
+  for (const r of records) for (const k of Object.keys(r.extra ?? {})) keys.add(k);
+
+  const out: Record<string, ExtraFieldSummary> = {};
+  for (const key of Array.from(keys).sort()) {
+    const present = records.filter((r) => r.extra?.[key] !== undefined);
+    const numeric = present.filter((r): r is NormalizedMeasurement & { extra: Record<string, number> } => typeof r.extra?.[key] === "number");
+    if (!numeric.length) {
+      out[key] = { readings: present.length, type: "other", sample: JSON.stringify(present[0].extra![key]).slice(0, 120) };
+      continue;
+    }
+    const values = numeric.map((r) => r.extra[key]);
+    const summary: ExtraFieldSummary = {
+      readings: present.length,
+      type: "number",
+      min: Math.min(...values),
+      max: Math.max(...values),
+      mean: round(values.reduce((a, b) => a + b, 0) / values.length, 3),
+    };
+    for (const metric of METRIC_KEYS) {
+      const pairs = numeric
+        .map((r) => [r.extra[key], (r as unknown as Record<string, unknown>)[metric]] as const)
+        .filter((p): p is readonly [number, number] => typeof p[1] === "number");
+      if (pairs.length >= 2 && pairs.every(([a, b]) => Math.abs(a - b) < 1e-9)) {
+        summary.equals_metric = metric;
+        break;
+      }
+    }
+    const pairsWith = (metric: MetricKey): Array<[number, number]> =>
+      numeric
+        .map((r) => [r.extra[key], (r as unknown as Record<string, unknown>)[metric]] as [number, unknown])
+        .filter((p): p is [number, number] => typeof p[1] === "number");
+    summary.r_vs_body_fat_pct = pearson(pairsWith("body_fat_pct"));
+    summary.r_vs_weight_kg = pearson(pairsWith("weight_kg"));
+    out[key] = JSON.parse(JSON.stringify(summary)) as ExtraFieldSummary;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

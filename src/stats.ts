@@ -18,6 +18,24 @@ export function mean(values: number[]): number | undefined {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
+/** Pearson correlation of paired values; undefined below 3 pairs or with zero variance. */
+export function pearson(pairs: Array<[number, number]>): number | undefined {
+  if (pairs.length < 3) return undefined;
+  const n = pairs.length;
+  const mx = pairs.reduce((a, [x]) => a + x, 0) / n;
+  const my = pairs.reduce((a, [, y]) => a + y, 0) / n;
+  let sxx = 0;
+  let syy = 0;
+  let sxy = 0;
+  for (const [x, y] of pairs) {
+    sxx += (x - mx) ** 2;
+    syy += (y - my) ** 2;
+    sxy += (x - mx) * (y - my);
+  }
+  if (sxx === 0 || syy === 0) return undefined;
+  return round(sxy / Math.sqrt(sxx * syy), 3);
+}
+
 export interface Regression {
   /** Change in value per day. */
   slope_per_day: number;
