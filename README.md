@@ -174,6 +174,22 @@ npx wrangler deploy
 Then ask your coach: *"Pull my latest scale reading and tell me whether the
 last month's weight loss came from fat or lean mass."*
 
+## Connector icon
+
+The Worker advertises `PUBLIC_URL/icon.png` in its MCP `serverInfo.icons`
+(and `websiteUrl`), so clients that render server branding show it in the
+connector list. The default is a generated scale icon (`npm run icon`). To use
+the official Renpho Health app icon instead, save the PNG from the App Store /
+Play Store listing and embed it:
+
+```sh
+npm run icon:embed -- ~/Downloads/renpho-health-icon.png   # writes src/icon.ts + assets/icon.png
+npm run deploy
+```
+
+(The official mark is Renpho's trademark — fine for a personal deployment, not
+for redistribution, which is why it isn't in this repo.)
+
 ## Local development
 
 ```sh

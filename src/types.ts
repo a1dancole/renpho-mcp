@@ -32,6 +32,8 @@ export interface Env {
   MCP_OBJECT: DurableObjectNamespace;
   /** Secret used to AES-GCM seal everything written to RENPHO_CACHE. */
   SESSION_ENCRYPTION_KEY: string;
+  /** Public origin of this Worker (for serverInfo icons/websiteUrl). */
+  PUBLIC_URL: string;
   /** IANA tz used to resolve "today" and to stamp measurements with local time. */
   TIME_ZONE: string;
   /** Optional comma-separated allow-list of Renpho emails permitted to connect. */

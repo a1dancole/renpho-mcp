@@ -16,10 +16,19 @@ import { registerTools } from "./tools";
 import type { Env, Props } from "./types";
 
 export class RenphoMCP extends McpAgent<Env, Record<string, never>, Props> {
+  // `this.env` is set by the Durable Object base constructor, so it is
+  // available to field initialisers. PUBLIC_URL lets clients that render
+  // server branding (Claude's connector list) show the icon served at /icon.png.
   server = new McpServer({
     name: "Renpho Health",
     title: "Renpho Health",
     version: "0.1.0",
+    ...(this.env?.PUBLIC_URL
+      ? {
+          websiteUrl: this.env.PUBLIC_URL,
+          icons: [{ src: `${this.env.PUBLIC_URL.replace(/\/$/, "")}/icon.png`, mimeType: "image/png", sizes: ["512x512"] }],
+        }
+      : {}),
   });
 
   private client?: RenphoClient;

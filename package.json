@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "icon": "node scripts/make-icon.mjs",
+    "icon:embed": "node scripts/embed-icon.mjs",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

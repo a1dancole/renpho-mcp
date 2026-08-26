@@ -36,6 +36,8 @@
     }
   ],
   "vars": {
+    // Public origin of this Worker; used for the connector icon/website advertised to MCP clients.
+    "PUBLIC_URL": "https://renpho-health-mcp.a1dancole.workers.dev",
     // IANA timezone used to resolve "today"/"last 30 days" and to stamp each
     // measurement with a local date/time.
     "TIME_ZONE": "Europe/London",
