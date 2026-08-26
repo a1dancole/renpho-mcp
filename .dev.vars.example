@@ -1,0 +1,5 @@
+# Copy to `.dev.vars` for local `wrangler dev`. Never commit the real file.
+# Any long random string; used to encrypt the Renpho session + cached data in KV.
+SESSION_ENCRYPTION_KEY="change-me-to-a-long-random-string"
+# Optional: comma-separated Renpho account emails allowed to connect. Empty = anyone.
+ALLOWED_EMAILS=""

@@ -1,0 +1,46 @@
+name: Deploy to Cloudflare Workers
+
+# Deploy on every push to master, or on demand from the Actions tab.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+# One deploy at a time; cancel an in-progress run if a newer push lands.
+concurrency:
+  group: workers-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build & deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Gate the deploy: a type error or failing test must block the push to prod.
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # App secrets (SESSION_ENCRYPTION_KEY) live in Cloudflare, not GitHub —
+      # set once in the dashboard. This workflow only needs the Cloudflare API
+      # token + account id.
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

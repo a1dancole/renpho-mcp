@@ -1,0 +1,10 @@
+{
+  // Test files run under Node (vitest) and compare against node:crypto, so
+  // they need Node's types in addition to the Workers types.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules"]
+}

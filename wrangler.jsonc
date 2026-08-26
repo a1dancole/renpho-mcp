@@ -1,0 +1,48 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "renpho-health-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["RenphoMCP"],
+      "tag": "v1"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "RenphoMCP",
+        "name": "MCP_OBJECT"
+      }
+    ]
+  },
+  "kv_namespaces": [
+    {
+      // OAuth grants/tokens issued to Claude. Created via:
+      //   wrangler kv namespace create OAUTH_KV
+      "binding": "OAUTH_KV",
+      "id": "REPLACE_WITH_OAUTH_KV_NAMESPACE_ID"
+    },
+    {
+      // Renpho session tokens + measurement pages (all AES-GCM sealed). Created via:
+      //   wrangler kv namespace create RENPHO_CACHE
+      "binding": "RENPHO_CACHE",
+      "id": "REPLACE_WITH_RENPHO_CACHE_NAMESPACE_ID"
+    }
+  ],
+  "vars": {
+    // IANA timezone used to resolve "today"/"last 30 days" and to stamp each
+    // measurement with a local date/time.
+    "TIME_ZONE": "Europe/London",
+    // Optional: comma-separated Renpho account emails allowed to connect.
+    // Leave empty to allow any Renpho account to connect to this deployment.
+    "ALLOWED_EMAILS": ""
+  }
+  // Secrets (set via `wrangler secret put`):
+  //   SESSION_ENCRYPTION_KEY   (any long random string — seals everything stored in RENPHO_CACHE)
+}
