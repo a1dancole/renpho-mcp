@@ -24,15 +24,15 @@
   "kv_namespaces": [
     {
       // OAuth grants/tokens issued to Claude. Created via:
-      //   wrangler kv namespace create OAUTH_KV
+      //   wrangler kv namespace create RENPHO_OAUTH_KV   (titled separately from google-health-mcp's OAUTH_KV)
       "binding": "OAUTH_KV",
-      "id": "REPLACE_WITH_OAUTH_KV_NAMESPACE_ID"
+      "id": "8bf3bb21a8ed4cfc935bde77616e4e11"
     },
     {
       // Renpho session tokens + measurement pages (all AES-GCM sealed). Created via:
       //   wrangler kv namespace create RENPHO_CACHE
       "binding": "RENPHO_CACHE",
-      "id": "REPLACE_WITH_RENPHO_CACHE_NAMESPACE_ID"
+      "id": "7e9a793b2eee4402bf11fd774292387d"
     }
   ],
   "vars": {
