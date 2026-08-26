@@ -40,7 +40,7 @@ jobs:
       # set once in the dashboard. This workflow only needs the Cloudflare API
       # token + account id.
       - name: Deploy
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
